@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:14
+    container_name: postgres14
+    environment:
+      POSTGRES_USER: VPN_USER
+      POSTGRES_PASSWORD: Orange123
+      POSTGRES_DB: newkah
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:

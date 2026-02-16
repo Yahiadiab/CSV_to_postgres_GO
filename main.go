@@ -2,184 +2,113 @@ package main
 
 import (
 	"context"
-	"encoding/csv"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
+	"flag"
 	"log"
-	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
-	"time"
+
+	"vpn-importer/internal"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Row struct {
-	VpnCode int64
-	ID      int64
-	Data    []byte // JSON bytes
-}
 
 func main() {
-	if len(os.Args) < 2 {
-		log.Fatal("usage: go run . <path-to-csv>")
-	}
-	csvPath := os.Args[1]
+	// Parse CLI flags
+	var mode string
+	flag.StringVar(&mode, "mode", "", "Ingestion mode: 'raw' or 'structured'")
+	flag.Parse()
 
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		log.Fatal("DATABASE_URL not set")
+	if mode != "raw" && mode != "structured" {
+		log.Fatal("usage: go run . --mode=<raw|structured>")
 	}
 
+	// Get database configurations
+	dbConfigs := internal.GetDatabaseConfigs()
+
+	// Automatically select database based on mode
+	var dbURL string
+	if mode == "raw" {
+		config := dbConfigs["hookah"]
+		dbURL = config.URL
+		log.Printf("Mode: RAW → Database: %s (%s)", config.Name, config.Description)
+	} else {
+		config := dbConfigs["newkah"]
+		dbURL = config.URL
+		log.Printf("Mode: STRUCTURED → Database: %s (%s)", config.Name, config.Description)
+	}
+
+	// Create database connection pool
 	ctx := context.Background()
-
-	// Create a connection pool
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		log.Fatalf("connect db: %v", err)
 	}
 	defer pool.Close()
 
-	// Open the CSV and build a reader
-	f, err := os.Open(csvPath)
+	// Get all file configurations
+	fileConfigs := internal.GetFileConfigs()
+
+	// Discover CSV files in csv/ directory
+	csvFiles, err := filepath.Glob("csv/*.csv")
 	if err != nil {
-		log.Fatalf("open csv: %v", err)
-	}
-	defer f.Close()
-
-	reader := csv.NewReader(f)
-	reader.FieldsPerRecord = -1
-
-	// Read header + map columns
-	header, err := reader.Read()
-	if err != nil {
-		log.Fatalf("read header: %v", err)
-	}
-	col := buildColumnIndex(header)
-
-	// Ensure required columns exist
-	for _, name := range []string{"vpn_code", "id", "data"} {
-		if _, ok := col[name]; !ok {
-			log.Fatalf("missing required column %q in header: %v", name, header)
-		}
+		log.Fatalf("failed to list CSV files: %v", err)
 	}
 
-	// Batch config
-	const batchSize = 1000
-	batch := make([]Row, 0, batchSize)
+	if len(csvFiles) == 0 {
+		log.Fatal("no CSV files found in csv/ directory")
+	}
 
-	inserted := 0
-	lineNum := 1 // header is line 1
+	log.Printf("Found %d CSV files to process", len(csvFiles))
 
-	// Read rows in a loop until EOF
-	for {
-		record, err := reader.Read()
-		lineNum++
+	// Process each CSV file
+	totalInserted := 0
+	processedCount := 0
+	skippedCount := 0
 
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			log.Fatalf("read row %d: %v", lineNum, err)
-		}
-
-		// Parse + validate row
-		row, err := parseRecord(record, col)
-		if err != nil {
-			log.Fatalf("parse error at line %d: %v\nrecord=%v", lineNum, err, record)
-		}
-
-		// Add to batch
-		batch = append(batch, row)
-
-		// Insert each full batch
-		if len(batch) >= batchSize {
-			if err := insertBatch(ctx, pool, batch); err != nil {
-				log.Fatalf("insert batch failed: %v", err)
+	for _, csvPath := range csvFiles {
+		fileName := filepath.Base(csvPath)
+		
+		// Find configuration for this file
+		var config *internal.FileConfig
+		for i := range fileConfigs {
+			if fileConfigs[i].FileName == fileName {
+				config = &fileConfigs[i]
+				break
 			}
-			inserted += len(batch)
-			log.Printf("inserted %d rows...", inserted)
-			batch = batch[:0]
 		}
-	}
 
-	// Insert remaining rows
-	if len(batch) > 0 {
-		if err := insertBatch(ctx, pool, batch); err != nil {
-			log.Fatalf("insert final batch failed: %v", err)
+		if config == nil {
+			log.Printf("⚠️  Skipping %s (no configuration found)", fileName)
+			skippedCount++
+			continue
 		}
-		inserted += len(batch)
-	}
 
-	log.Printf("done. inserted %d rows", inserted)
-}
-
-func buildColumnIndex(header []string) map[string]int {
-	m := make(map[string]int, len(header))
-	for i, h := range header {
-		m[strings.ToLower(strings.TrimSpace(h))] = i
-	}
-	return m
-}
-
-func parseRecord(record []string, col map[string]int) (Row, error) {
-	get := func(name string) string {
-		i := col[name]
-		if i < 0 || i >= len(record) {
-			return ""
+		// Skip files not compatible with structured mode
+		if mode == "structured" && !config.SupportsStructured {
+			log.Printf("⏭️  Skipping %s (not compatible with structured mode)", fileName)
+			skippedCount++
+			continue
 		}
-		return strings.TrimSpace(record[i])
-	}
 
-	vpnStr := get("vpn_code")
-	vpn, err := strconv.ParseInt(vpnStr, 10, 64)
-	if err != nil {
-		return Row{}, fmt.Errorf("invalid vpn_code %q: %w", vpnStr, err)
-	}
+		log.Printf("\n📄 Processing %s → %s.%s", fileName, mode, config.TableName)
 
-	idStr := get("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		return Row{}, fmt.Errorf("invalid id %q: %w", idStr, err)
-	}
-
-	dataStr := get("data")
-	if dataStr == "" {
-		return Row{}, fmt.Errorf("data is empty")
-	}
-
-	dataBytes := []byte(dataStr)
-	if !json.Valid(dataBytes) {
-		return Row{}, fmt.Errorf("data is not valid JSON (starts with): %.120s", dataStr)
-	}
-
-	return Row{VpnCode: vpn, ID: id, Data: dataBytes}, nil
-}
-
-func insertBatch(ctx context.Context, pool *pgxpool.Pool, rows []Row) error {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	const sql = `
-		INSERT INTO vpn_records (vpn_code, id, data)
-		VALUES ($1, $2, $3::jsonb)
-		ON CONFLICT (vpn_code, id)
-		DO UPDATE SET data = EXCLUDED.data
-	`
-
-	for _, r := range rows {
-		if _, err := tx.Exec(ctx, sql, r.VpnCode, r.ID, r.Data); err != nil {
-			return err
+		// Process the file
+		inserted, err := internal.ProcessFile(ctx, pool, csvPath, config, mode)
+		if err != nil {
+			log.Fatalf("❌ Failed to process %s: %v", fileName, err)
 		}
+
+		log.Printf("✅ Completed %s: inserted %d rows", fileName, inserted)
+		totalInserted += inserted
+		processedCount++
 	}
 
-	return tx.Commit(ctx)
+	log.Printf("\n" + strings.Repeat("═", 80))
+	log.Printf("✓ DONE")
+	log.Printf("  Processed: %d files", processedCount)
+	log.Printf("  Skipped:   %d files", skippedCount)
+	log.Printf("  Inserted:  %d total rows", totalInserted)
+	log.Printf("  Mode:      %s", strings.ToUpper(mode))
+	log.Printf(strings.Repeat("═", 80))
 }
