@@ -1,0 +1,42 @@
+# Compiled binary
+vpn-importer
+
+# CSV data files (may contain sensitive data)
+csv/*.csv
+csv/
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go coverage files
+*.cover
+coverage.txt
+
+# Dependency directories
+vendor/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables and secrets
+.env
+.env.local
+*.pem
+
+# Log files
+*.log
+
+# Database dumps
+*.sql.backup
+*.dump

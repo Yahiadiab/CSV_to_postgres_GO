@@ -14,13 +14,15 @@ import (
 
 
 func main() {
-	// Parse CLI flags
+
 	var mode string
+	var selectedFiles string
 	flag.StringVar(&mode, "mode", "", "Ingestion mode: 'raw' or 'structured'")
+	flag.StringVar(&selectedFiles, "files", "", "Optional: Comma-separated list of CSV files to process (e.g., 'NHK_VPN.csv,NHK_ACCESS.csv'). If empty, processes all files.")
 	flag.Parse()
 
 	if mode != "raw" && mode != "structured" {
-		log.Fatal("usage: go run . --mode=<raw|structured>")
+		log.Fatal("usage: go run . --mode=<raw|structured> [--files=<file1.csv,file2.csv,...>]")
 	}
 
 	// Get database configurations
@@ -59,7 +61,22 @@ func main() {
 		log.Fatal("no CSV files found in csv/ directory")
 	}
 
-	log.Printf("Found %d CSV files to process", len(csvFiles))
+	log.Printf("Found %d CSV files in csv/ directory", len(csvFiles))
+
+	// Parse selected files if provided
+	var selectedFileSet map[string]bool
+	if selectedFiles != "" {
+		selectedFileSet = make(map[string]bool)
+		for _, f := range strings.Split(selectedFiles, ",") {
+			fileName := strings.TrimSpace(f)
+			if fileName != "" {
+				selectedFileSet[fileName] = true
+			}
+		}
+		log.Printf("Selected files to process: %s", selectedFiles)
+	} else {
+		log.Printf("Processing all files (no --files flag provided)")
+	}
 
 	// Process each CSV file
 	totalInserted := 0
@@ -69,7 +86,12 @@ func main() {
 	for _, csvPath := range csvFiles {
 		fileName := filepath.Base(csvPath)
 		
-		// Find configuration for this file
+		
+		if selectedFileSet != nil && !selectedFileSet[fileName] {
+			continue 
+		}
+		
+		
 		var config *internal.FileConfig
 		for i := range fileConfigs {
 			if fileConfigs[i].FileName == fileName {

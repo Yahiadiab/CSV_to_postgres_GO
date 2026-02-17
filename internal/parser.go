@@ -141,7 +141,7 @@ func parseGenericRecord(record []string, colIndex map[string]int, config *FileCo
 		}
 	}
 	
-	// Get JSON data column (usually "data", but some files use different names)
+
 	dataColName := "data"
 	if _, ok := colIndex["data"]; !ok {
 		// Try alternative column names
